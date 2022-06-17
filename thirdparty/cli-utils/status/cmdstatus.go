@@ -18,6 +18,8 @@ import (
 	statusprinters "github.com/GoogleContainerTools/kpt/thirdparty/cli-utils/status/printers"
 	"github.com/go-errors/errors"
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/slice"
@@ -28,6 +30,7 @@ import (
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/collector"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/event"
 	kstatus "sigs.k8s.io/cli-utils/pkg/kstatus/status"
+	"sigs.k8s.io/cli-utils/pkg/object"
 	"sigs.k8s.io/cli-utils/pkg/printers"
 )
 
@@ -65,6 +68,7 @@ func NewRunner(ctx context.Context, factory util.Factory) *Runner {
 	c.Flags().StringVar(&r.output, "output", "events", "Output format.")
 	c.Flags().DurationVar(&r.timeout, "timeout", 0,
 		"How long to wait before exiting")
+	c.Flags().BoolVar(&r.listAll, "list-all", false, "List status of all packages or not")
 	return r
 }
 
@@ -85,6 +89,8 @@ type Runner struct {
 	timeout   time.Duration
 	output    string
 
+	listAll bool
+
 	pollerFactoryFunc func(util.Factory) (poller.Poller, error)
 }
 
@@ -100,16 +106,13 @@ func (r *Runner) preRunE(*cobra.Command, []string) error {
 	return nil
 }
 
-// runE implements the logic of the command and will delegate to the
-// poller to compute status for each of the resources. One of the printer
-// implementations takes care of printing the output.
-func (r *Runner) runE(c *cobra.Command, args []string) error {
-	pr := printer.FromContextOrDie(r.ctx)
+// Load inventory info from local storage
+func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (object.ObjMetadataSet, error) {
 	if len(args) == 0 {
 		// default to the current working directory
 		cwd, err := os.Getwd()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		args = append(args, cwd)
 	}
@@ -119,32 +122,94 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 	if args[0] != "-" {
 		path, err = argutil.ResolveSymlink(r.ctx, path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	_, inv, err := live.Load(r.factory, path, c.InOrStdin())
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	invInfo, err := live.ToInventoryInfo(inv)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	invClient, err := r.invClientFunc(r.factory)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Based on the inventory template manifest we look up the inventory
 	// from the live state using the inventory client.
 	identifiers, err := invClient.GetClusterObjs(invInfo)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	return identifiers, nil
+}
+
+// Retrieve a list of inventory object from the cluster
+// Wrap it to become an ObjMetadataSet
+// Refer to the backbone of GetClusterObjs function in inventory package
+func (r *Runner) listInvFromCluster() (object.ObjMetadataSet, error) {
+	// Launch a dynamic client
+	dc, err := r.factory.DynamicClient()
+	if err != nil {
+		return nil, err
 	}
 
+	// Launch a mapper
+	mapper, err := r.factory.ToRESTMapper()
+	if err != nil {
+		return nil, err
+	}
+
+	// Define the mapping
+	mapping, err := mapper.RESTMapping(live.ResourceGroupGVK.GroupKind(), live.ResourceGroupGVK.Version)
+	if err != nil {
+		return nil, err
+	}
+
+	// retrieve the list from the cluster
+	clusterInvs, err := dc.Resource(mapping.Resource).List(context.TODO(), metav1.ListOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	if apierrors.IsNotFound(err) {
+		return object.ObjMetadataSet{}, nil
+	}
+
+	// wrapping
+	identifiers := object.ObjMetadataSet{}
+	for _, inv := range clusterInvs.Items {
+		wrappedInvObj := live.WrapInventoryObj(&inv)
+		wrappedInvObjSlice, err := wrappedInvObj.Load()
+		if err != nil {
+			return object.ObjMetadataSet{}, nil
+		}
+		identifiers = append(identifiers, wrappedInvObjSlice...)
+	}
+	return identifiers, nil
+}
+
+// runE implements the logic of the command and will delegate to the
+// poller to compute status for each of the resources. One of the printer
+// implementations takes care of printing the output.
+func (r *Runner) runE(c *cobra.Command, args []string) error {
+	pr := printer.FromContextOrDie(r.ctx)
+
+	var identifiers object.ObjMetadataSet
+	var err error
+	if r.listAll {
+		identifiers, err = r.listInvFromCluster()
+	} else {
+		identifiers, err = r.loadInvFromDisk(c, args)
+		if err != nil {
+			return err
+		}
+	}
 	// Exit here if the inventory is empty.
 	if len(identifiers) == 0 {
 		pr.Printf("no resources found in the inventory\n")
@@ -204,7 +269,7 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 // ResourceStatusCollector that will cancel the context (using the cancelFunc)
 // when all resources have reached the desired status.
 func desiredStatusNotifierFunc(cancelFunc context.CancelFunc,
-	desired kstatus.Status) collector.ObserverFunc {
+		desired kstatus.Status) collector.ObserverFunc {
 	return func(rsc *collector.ResourceStatusCollector, _ event.Event) {
 		var rss []*event.ResourceStatus
 		for _, rs := range rsc.ResourceStatuses {
