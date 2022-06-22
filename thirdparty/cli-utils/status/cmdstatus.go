@@ -107,7 +107,9 @@ func (r *Runner) preRunE(*cobra.Command, []string) error {
 }
 
 // Load inventory info from local storage
-func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (object.ObjMetadataSet, error) {
+// and get info from the cluster based on the local info
+// wrap it to be a map mapping from string to objectMetadataSet
+func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (map[string]object.ObjMetadataSet, error) {
 	if len(args) == 0 {
 		// default to the current working directory
 		cwd, err := os.Getwd()
@@ -147,13 +149,15 @@ func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (object.ObjMet
 	if err != nil {
 		return nil, err
 	}
-	return identifiers, nil
+	identifiersMap := make(map[string]object.ObjMetadataSet)
+	identifiersMap[inv.Name] = identifiers
+	return identifiersMap, nil
 }
 
 // Retrieve a list of inventory object from the cluster
-// Wrap it to become an ObjMetadataSet
+// Wrap it to become a map mapping from string to ObjMetadataSet
 // Refer to the backbone of GetClusterObjs function in inventory package
-func (r *Runner) listInvFromCluster() (object.ObjMetadataSet, error) {
+func (r *Runner) listInvFromCluster() (map[string]object.ObjMetadataSet, error) {
 	// Launch a dynamic client
 	dc, err := r.factory.DynamicClient()
 	if err != nil {
@@ -178,59 +182,34 @@ func (r *Runner) listInvFromCluster() (object.ObjMetadataSet, error) {
 		return nil, err
 	}
 	if apierrors.IsNotFound(err) {
-		return object.ObjMetadataSet{}, nil
+		return make(map[string]object.ObjMetadataSet), nil
 	}
 
 	// wrapping
-	identifiers := object.ObjMetadataSet{}
+	identifiersMap := make(map[string]object.ObjMetadataSet)
 	for _, inv := range clusterInvs.Items {
 		wrappedInvObj := live.WrapInventoryObj(&inv)
 		wrappedInvObjSlice, err := wrappedInvObj.Load()
 		if err != nil {
-			return object.ObjMetadataSet{}, nil
+			return make(map[string]object.ObjMetadataSet), nil
 		}
-		identifiers = append(identifiers, wrappedInvObjSlice...)
+		invName := inv.GetName()
+		if _, ok := identifiersMap[invName]; !ok {
+			identifiersMap[invName] = wrappedInvObjSlice
+		} else {
+			identifiersMap[invName] = append(identifiersMap[invName], wrappedInvObjSlice...)
+		}
 	}
-	return identifiers, nil
+	return identifiersMap, nil
 }
 
-// runE implements the logic of the command and will delegate to the
-// poller to compute status for each of the resources. One of the printer
-// implementations takes care of printing the output.
-func (r *Runner) runE(c *cobra.Command, args []string) error {
-	pr := printer.FromContextOrDie(r.ctx)
-
-	var identifiers object.ObjMetadataSet
-	var err error
-	if r.listAll {
-		identifiers, err = r.listInvFromCluster()
-	} else {
-		identifiers, err = r.loadInvFromDisk(c, args)
-		if err != nil {
-			return err
-		}
-	}
-	// Exit here if the inventory is empty.
-	if len(identifiers) == 0 {
-		pr.Printf("no resources found in the inventory\n")
-		return nil
-	}
-
+// Printing status of resources
+func (r *Runner) printStatus(pr printer.Printer, invName string, identifiers object.ObjMetadataSet, stopChan chan int) error {
+	defer func() { stopChan <- 1 }()
 	statusPoller, err := r.pollerFactoryFunc(r.factory)
 	if err != nil {
 		return err
 	}
-
-	// Fetch a printer implementation based on the desired output format as
-	// specified in the output flag.
-	printer, err := statusprinters.CreatePrinter(r.output, genericclioptions.IOStreams{
-		Out:    pr.OutStream(),
-		ErrOut: pr.ErrStream(),
-	})
-	if err != nil {
-		return errors.WrapPrefix(err, "error creating printer", 1)
-	}
-
 	// If the user has specified a timeout, we create a context with timeout,
 	// otherwise we create a context with cancel.
 	var ctx context.Context
@@ -257,19 +236,74 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("unknown value for pollUntil: %q", r.pollUntil)
 	}
+	// Fetch a printer implementation based on the desired output format as
+	// specified in the output flag.
+
+	printer, err := statusprinters.CreatePrinter(r.output, genericclioptions.IOStreams{
+		Out:    pr.OutStream(),
+		ErrOut: pr.ErrStream(),
+	}, invName)
+
+	if err != nil {
+		return errors.WrapPrefix(err, "error creating printer", 1)
+	}
 
 	eventChannel := statusPoller.Poll(ctx, identifiers, polling.PollOptions{
 		PollInterval: r.period,
 	})
 
-	return printer.Print(eventChannel, identifiers, cancelFunc)
+	err = printer.Print(eventChannel, identifiers, cancelFunc)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// runE implements the logic of the command and will delegate to the
+// poller to compute status for each of the resources. One of the printer
+// implementations takes care of printing the output.
+func (r *Runner) runE(c *cobra.Command, args []string) error {
+	pr := printer.FromContextOrDie(r.ctx)
+
+	var identifiersMap map[string]object.ObjMetadataSet
+	var err error
+	if r.listAll {
+		identifiersMap, err = r.listInvFromCluster()
+	} else {
+		identifiersMap, err = r.loadInvFromDisk(c, args)
+		if err != nil {
+			return err
+		}
+	}
+	// Exit here if the inventory is empty.
+	if len(identifiersMap) == 0 {
+		pr.Printf("no resources found in the inventory\n")
+		return nil
+	}
+
+	counter := 0
+	stopChan := make(chan int, len(identifiersMap))
+	for invName, identifiers := range identifiersMap {
+		// Launch one printer per inventory name
+		go func() {
+			err := r.printStatus(pr, invName, identifiers, stopChan)
+			if err != nil {
+				panic(err)
+			}
+		}()
+	}
+	// wait till all printers return
+	for counter < len(identifiersMap) {
+		counter += <-stopChan
+	}
+	return nil
 }
 
 // desiredStatusNotifierFunc returns an Observer function for the
 // ResourceStatusCollector that will cancel the context (using the cancelFunc)
 // when all resources have reached the desired status.
 func desiredStatusNotifierFunc(cancelFunc context.CancelFunc,
-		desired kstatus.Status) collector.ObserverFunc {
+	desired kstatus.Status) collector.ObserverFunc {
 	return func(rsc *collector.ResourceStatusCollector, _ event.Event) {
 		var rss []*event.ResourceStatus
 		for _, rs := range rsc.ResourceStatuses {
