@@ -15,6 +15,8 @@
 package list
 
 import (
+	"fmt"
+
 	"sigs.k8s.io/cli-utils/pkg/apply/event"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/collector"
 	pollevent "sigs.k8s.io/cli-utils/pkg/kstatus/polling/event"
@@ -22,10 +24,17 @@ import (
 	"sigs.k8s.io/cli-utils/pkg/print/list"
 )
 
+const (
+	colorCyan  = "\033[36m"
+	colorReset = "\033[0m"
+	separator  = "-----------------------------------------"
+)
+
 // BaseListPrinter implements the Printer interface and outputs the resource
 // status information as a list of events as they happen.
 type BaseListPrinter struct {
 	Formatter list.Formatter
+	InvName   string
 }
 
 // Print takes an event channel and outputs the status events on the channel
@@ -41,9 +50,26 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 	// stopping the poller at the correct time.
 	done := coll.ListenWithObserver(ch, collector.ObserverFunc(
 		func(statusCollector *collector.ResourceStatusCollector, e pollevent.Event) {
+			// print the inventory name
+			fmt.Println(separator)
+			fmt.Println(colorCyan + ep.InvName + colorReset)
+			fmt.Println(separator)
 			err := ep.printStatusEvent(e)
 			if err != nil {
 				panic(err)
+			}
+			// print all status of resources except the latest updated one under this inventory group
+			for id, status := range statusCollector.ResourceStatuses {
+				if id != e.Resource.Identifier {
+					err := ep.Formatter.FormatStatusEvent(event.StatusEvent{
+						Identifier:       id,
+						Resource:         status.Resource,
+						PollResourceInfo: status,
+					})
+					if err != nil {
+						panic(err)
+					}
+				}
 			}
 			cancelFunc(statusCollector, e)
 		}),
