@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	colorCyan  = "\033[36m"
-	colorReset = "\033[0m"
-	separator  = "-----------------------------------------"
+	colorYellow = "\033[33m"
+	colorCyan   = "\033[36m"
+	colorReset  = "\033[0m"
+	separator   = "-----------------------------------------"
 )
 
 // BaseListPrinter implements the Printer interface and outputs the resource
@@ -54,7 +55,9 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 			fmt.Println(separator)
 			fmt.Println(colorCyan + ep.InvName + colorReset)
 			fmt.Println(separator)
+			fmt.Print(colorYellow)
 			err := ep.printStatusEvent(e)
+			fmt.Print(colorReset)
 			if err != nil {
 				panic(err)
 			}
