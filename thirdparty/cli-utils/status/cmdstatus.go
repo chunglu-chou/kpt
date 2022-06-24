@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	ss "strings"
 	"time"
 
 	"github.com/GoogleContainerTools/kpt/internal/docs/generated/livedocs"
@@ -68,7 +69,9 @@ func NewRunner(ctx context.Context, factory util.Factory) *Runner {
 	c.Flags().StringVar(&r.output, "output", "events", "Output format.")
 	c.Flags().DurationVar(&r.timeout, "timeout", 0,
 		"How long to wait before exiting")
-	c.Flags().BoolVar(&r.listAll, "list-all", false, "List status of all packages or not")
+	c.Flags().BoolVar(&r.list, "list", false, "List status of all packages or not")
+	c.Flags().StringVar(&r.inventoryNames, "inv-name", "", "names of skipping inventory: inv1,inv2,...")
+	c.Flags().StringVar(&r.namespaces, "ns", "", "names of skipping namespaces: ns1,ns2,...")
 	return r
 }
 
@@ -89,7 +92,11 @@ type Runner struct {
 	timeout   time.Duration
 	output    string
 
-	listAll bool
+	list             bool
+	inventoryNames   string
+	inventoryNameSet map[string]bool
+	namespaces       string
+	namespaceSet     map[string]bool
 
 	pollerFactoryFunc func(util.Factory) (poller.Poller, error)
 }
@@ -102,6 +109,19 @@ func (r *Runner) preRunE(*cobra.Command, []string) error {
 
 	if found := printers.ValidatePrinterType(r.output); !found {
 		return fmt.Errorf("unknown output type %q", r.output)
+	}
+
+	if !r.list && (r.inventoryNames != "" || r.namespaces != "") {
+		return fmt.Errorf("ns and inv-name flag should only be used with list flag")
+	}
+
+	r.inventoryNameSet = make(map[string]bool)
+	for _, name := range ss.Split(r.inventoryNames, ",") {
+		r.inventoryNameSet[name] = true
+	}
+	r.namespaceSet = make(map[string]bool)
+	for _, ns := range ss.Split(r.namespaces, ",") {
+		r.namespaceSet[ns] = true
 	}
 	return nil
 }
@@ -150,7 +170,16 @@ func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (map[string]ob
 		return nil, err
 	}
 	identifiersMap := make(map[string]object.ObjMetadataSet)
-	identifiersMap[inv.Name] = identifiers
+	filteredSlice := object.ObjMetadataSet{}
+	for _, obj := range identifiers {
+		if _, ok := r.namespaceSet[obj.Namespace]; !ok {
+			filteredSlice = append(filteredSlice, obj)
+		}
+	}
+	if _, ok := r.inventoryNameSet[inv.Name]; ok || len(filteredSlice) == 0 {
+		return identifiersMap, nil
+	}
+	identifiersMap[inv.Name] = filteredSlice
 	return identifiersMap, nil
 }
 
@@ -193,11 +222,20 @@ func (r *Runner) listInvFromCluster() (map[string]object.ObjMetadataSet, error) 
 		if err != nil {
 			return make(map[string]object.ObjMetadataSet), nil
 		}
+		filteredSlice := object.ObjMetadataSet{}
+		for _, obj := range wrappedInvObjSlice {
+			if _, ok := r.namespaceSet[obj.Namespace]; !ok {
+				filteredSlice = append(filteredSlice, obj)
+			}
+		}
 		invName := inv.GetName()
+		if _, ok := r.inventoryNameSet[invName]; ok || len(filteredSlice) == 0 {
+			continue
+		}
 		if _, ok := identifiersMap[invName]; !ok {
-			identifiersMap[invName] = wrappedInvObjSlice
+			identifiersMap[invName] = filteredSlice
 		} else {
-			identifiersMap[invName] = append(identifiersMap[invName], wrappedInvObjSlice...)
+			identifiersMap[invName] = append(identifiersMap[invName], filteredSlice...)
 		}
 	}
 	return identifiersMap, nil
@@ -267,7 +305,7 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 
 	var identifiersMap map[string]object.ObjMetadataSet
 	var err error
-	if r.listAll {
+	if r.list {
 		identifiersMap, err = r.listInvFromCluster()
 	} else {
 		identifiersMap, err = r.loadInvFromDisk(c, args)
@@ -285,12 +323,14 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 	stopChan := make(chan int, len(identifiersMap))
 	for invName, identifiers := range identifiersMap {
 		// Launch one printer per inventory name
-		go func() {
+		go func(invName string) {
+			// invName as an input argument to avoid a pitfall about using anonymous inside the loop
 			err := r.printStatus(pr, invName, identifiers, stopChan)
 			if err != nil {
+				fmt.Println(err)
 				panic(err)
 			}
-		}()
+		}(invName)
 	}
 	// wait till all printers return
 	for counter < len(identifiersMap) {
