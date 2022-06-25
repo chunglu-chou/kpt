@@ -16,6 +16,7 @@ package list
 
 import (
 	"fmt"
+	"sync"
 
 	"sigs.k8s.io/cli-utils/pkg/apply/event"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/collector"
@@ -25,6 +26,7 @@ import (
 )
 
 const (
+	// printing parameters
 	colorYellow = "\033[33m"
 	colorCyan   = "\033[36m"
 	colorReset  = "\033[0m"
@@ -36,6 +38,7 @@ const (
 type BaseListPrinter struct {
 	Formatter list.Formatter
 	InvName   string
+	Lock      sync.Mutex
 }
 
 // Print takes an event channel and outputs the status events on the channel
@@ -51,6 +54,8 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 	// stopping the poller at the correct time.
 	done := coll.ListenWithObserver(ch, collector.ObserverFunc(
 		func(statusCollector *collector.ResourceStatusCollector, e pollevent.Event) {
+			// critical section
+			ep.Lock.Lock()
 			// print the inventory name
 			fmt.Println(separator)
 			fmt.Println(colorCyan + ep.InvName + colorReset)
@@ -59,6 +64,8 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 			err := ep.printStatusEvent(e)
 			fmt.Print(colorReset)
 			if err != nil {
+				// error detected, quit critical section
+				ep.Lock.Unlock()
 				panic(err)
 			}
 			// print all status of resources except the latest updated one under this inventory group
@@ -70,10 +77,14 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 						PollResourceInfo: status,
 					})
 					if err != nil {
+						// error detected, quit critical section
+						ep.Lock.Unlock()
 						panic(err)
 					}
 				}
 			}
+			// printing ended, quit critical section
+			ep.Lock.Unlock()
 			cancelFunc(statusCollector, e)
 		}),
 	)
