@@ -341,10 +341,11 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 		identifiersMap, err = r.listInvFromCluster()
 	} else {
 		identifiersMap, err = r.loadInvFromDisk(c, args)
-		if err != nil {
-			return err
-		}
 	}
+	if err != nil {
+		return err
+	}
+
 	// Exit here if the inventory is empty.
 	if len(identifiersMap) == 0 {
 		pr.Printf("no resources found in the inventory\n")
@@ -355,13 +356,13 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 	stopChan := make(chan int, len(identifiersMap))
 	for invName, identifiers := range identifiersMap {
 		// Launch one printer per inventory name
-		go func(invName string) {
+		go func(invName string, identifiers object.ObjMetadataSet) {
 			// invName as an input argument to avoid a pitfall about using anonymous inside the loop
 			err := r.printStatus(pr, invName, identifiers, stopChan)
 			if err != nil {
 				panic(err)
 			}
-		}(invName)
+		}(invName, identifiers)
 	}
 	// wait till all printers return
 	for counter < len(identifiersMap) {
@@ -375,7 +376,7 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 // ResourceStatusCollector that will cancel the context (using the cancelFunc)
 // when all resources have reached the desired status.
 func desiredStatusNotifierFunc(cancelFunc context.CancelFunc,
-	desired kstatus.Status) collector.ObserverFunc {
+		desired kstatus.Status) collector.ObserverFunc {
 	return func(rsc *collector.ResourceStatusCollector, _ event.Event) {
 		var rss []*event.ResourceStatus
 		for _, rs := range rsc.ResourceStatuses {
