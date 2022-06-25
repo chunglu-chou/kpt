@@ -70,8 +70,8 @@ func NewRunner(ctx context.Context, factory util.Factory) *Runner {
 	c.Flags().DurationVar(&r.timeout, "timeout", 0,
 		"How long to wait before exiting")
 	c.Flags().BoolVar(&r.list, "list", false, "List status of all packages or not")
-	c.Flags().StringVar(&r.inventoryNames, "inv-name", "", "names of skipping inventory: inv1,inv2,...")
-	c.Flags().StringVar(&r.namespaces, "ns", "", "names of skipping namespaces: ns1,ns2,...")
+	c.Flags().StringVar(&r.inventoryNames, "inv-name", "", "names of targeted inventory: inv1,inv2,...")
+	c.Flags().StringVar(&r.namespaces, "namespace", "", "names of targeted namespaces: ns1,ns2,...")
 	return r
 }
 
@@ -115,13 +115,18 @@ func (r *Runner) preRunE(*cobra.Command, []string) error {
 		return fmt.Errorf("ns and inv-name flag should only be used with list flag")
 	}
 
-	r.inventoryNameSet = make(map[string]bool)
-	for _, name := range ss.Split(r.inventoryNames, ",") {
-		r.inventoryNameSet[name] = true
+	if r.inventoryNames != "" {
+		r.inventoryNameSet = make(map[string]bool)
+		for _, name := range ss.Split(r.inventoryNames, ",") {
+			r.inventoryNameSet[name] = true
+		}
 	}
-	r.namespaceSet = make(map[string]bool)
-	for _, ns := range ss.Split(r.namespaces, ",") {
-		r.namespaceSet[ns] = true
+
+	if r.namespaces != "" {
+		r.namespaceSet = make(map[string]bool)
+		for _, ns := range ss.Split(r.namespaces, ",") {
+			r.namespaceSet[ns] = true
+		}
 	}
 	return nil
 }
@@ -171,14 +176,28 @@ func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (map[string]ob
 	}
 	identifiersMap := make(map[string]object.ObjMetadataSet)
 	filteredSlice := object.ObjMetadataSet{}
-	for _, obj := range identifiers {
-		if _, ok := r.namespaceSet[obj.Namespace]; !ok {
-			filteredSlice = append(filteredSlice, obj)
+	// if there are targeted namespaces
+	if len(r.namespaceSet) != 0 {
+		for _, obj := range identifiers {
+			// check if the object is under one of the targeted namespaces
+			if _, ok := r.namespaceSet[obj.Namespace]; ok {
+				filteredSlice = append(filteredSlice, obj)
+			}
 		}
+	} else {
+		// no targeted namespaces, no filtering
+		filteredSlice = identifiers
 	}
-	if _, ok := r.inventoryNameSet[inv.Name]; ok || len(filteredSlice) == 0 {
+	// Check if all elements are filtered out
+	if len(filteredSlice) == 0 {
 		return identifiersMap, nil
 	}
+
+	// Check if there are targeted inventory names and include the current inventory name
+	if _, ok := r.inventoryNameSet[inv.Name]; !ok && len(r.inventoryNameSet) != 0 {
+		return identifiersMap, nil
+	}
+
 	identifiersMap[inv.Name] = filteredSlice
 	return identifiersMap, nil
 }
@@ -223,13 +242,26 @@ func (r *Runner) listInvFromCluster() (map[string]object.ObjMetadataSet, error) 
 			return make(map[string]object.ObjMetadataSet), nil
 		}
 		filteredSlice := object.ObjMetadataSet{}
-		for _, obj := range wrappedInvObjSlice {
-			if _, ok := r.namespaceSet[obj.Namespace]; !ok {
-				filteredSlice = append(filteredSlice, obj)
+		// if there are targeted namespaces
+		if len(r.namespaceSet) != 0 {
+			for _, obj := range wrappedInvObjSlice {
+				// check if the object is under one of the targeted namespaces
+				if _, ok := r.namespaceSet[obj.Namespace]; ok {
+					filteredSlice = append(filteredSlice, obj)
+				}
 			}
+		} else {
+			// no targeted namespaces, no filtering
+			filteredSlice = wrappedInvObjSlice
 		}
+		// Check if all elements are filtered out
+		if len(filteredSlice) == 0 {
+			continue
+		}
+
 		invName := inv.GetName()
-		if _, ok := r.inventoryNameSet[invName]; ok || len(filteredSlice) == 0 {
+		// Check if there are targeted inventory names and include the current inventory name
+		if _, ok := r.inventoryNameSet[invName]; !ok && len(r.inventoryNameSet) != 0 {
 			continue
 		}
 		if _, ok := identifiersMap[invName]; !ok {
@@ -327,7 +359,6 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 			// invName as an input argument to avoid a pitfall about using anonymous inside the loop
 			err := r.printStatus(pr, invName, identifiers, stopChan)
 			if err != nil {
-				fmt.Println(err)
 				panic(err)
 			}
 		}(invName)
@@ -336,6 +367,7 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 	for counter < len(identifiersMap) {
 		counter += <-stopChan
 	}
+	close(stopChan)
 	return nil
 }
 
