@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleContainerTools/kpt/pkg/live"
 	"github.com/GoogleContainerTools/kpt/pkg/status"
 	statusprinters "github.com/GoogleContainerTools/kpt/thirdparty/cli-utils/status/printers"
+	"github.com/GoogleContainerTools/kpt/thirdparty/cli-utils/status/printers/list"
 	"github.com/go-errors/errors"
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +41,10 @@ const (
 	Current = "current"
 	Deleted = "deleted"
 	Forever = "forever"
+	// printing parameters
+	colorCyan  = "\033[36m"
+	colorReset = "\033[0m"
+	separator  = "-----------------------------------------"
 )
 
 var (
@@ -72,6 +77,7 @@ func NewRunner(ctx context.Context, factory util.Factory) *Runner {
 	c.Flags().BoolVar(&r.list, "list", false, "List status of all packages or not")
 	c.Flags().StringVar(&r.inventoryNames, "inv-name", "", "names of targeted inventory: inv1,inv2,...")
 	c.Flags().StringVar(&r.namespaces, "namespace", "", "names of targeted namespaces: ns1,ns2,...")
+	c.Flags().StringVar(&r.status, "status", "", "targeted status: st1,st2...")
 	return r
 }
 
@@ -97,6 +103,8 @@ type Runner struct {
 	inventoryNameSet map[string]bool
 	namespaces       string
 	namespaceSet     map[string]bool
+	status           string
+	statusSet        map[string]bool
 
 	pollerFactoryFunc func(util.Factory) (poller.Poller, error)
 }
@@ -112,7 +120,7 @@ func (r *Runner) preRunE(*cobra.Command, []string) error {
 	}
 
 	if !r.list && (r.inventoryNames != "" || r.namespaces != "") {
-		return fmt.Errorf("ns and inv-name flag should only be used with list flag")
+		return fmt.Errorf("namespace and inv-name flag should only be used with list flag")
 	}
 
 	if r.inventoryNames != "" {
@@ -128,13 +136,21 @@ func (r *Runner) preRunE(*cobra.Command, []string) error {
 			r.namespaceSet[ns] = true
 		}
 	}
+
+	if r.status != "" {
+		r.statusSet = make(map[string]bool)
+		for _, st := range ss.Split(r.status, ",") {
+			parsedST := ss.ToLower(st)
+			r.statusSet[parsedST] = true
+		}
+	}
 	return nil
 }
 
 // Load inventory info from local storage
 // and get info from the cluster based on the local info
 // wrap it to be a map mapping from string to objectMetadataSet
-func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (map[string]object.ObjMetadataSet, error) {
+func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (*list.PrintData, error) {
 	if len(args) == 0 {
 		// default to the current working directory
 		cwd, err := os.Getwd()
@@ -174,38 +190,38 @@ func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (map[string]ob
 	if err != nil {
 		return nil, err
 	}
-	identifiersMap := make(map[string]object.ObjMetadataSet)
-	filteredSlice := object.ObjMetadataSet{}
-	// if there are targeted namespaces
-	if len(r.namespaceSet) != 0 {
-		for _, obj := range identifiers {
-			// check if the object is under one of the targeted namespaces
-			if _, ok := r.namespaceSet[obj.Namespace]; ok {
-				filteredSlice = append(filteredSlice, obj)
-			}
+
+	printData := list.PrintData{}
+	// initialize maps in printData
+	printData.IndexGroupMap = make(map[int]string)
+	printData.IndexResourceMap = make(map[int]object.ObjMetadata)
+	// initialize idx
+	idx := 0
+	// Add the inventory name
+	printData.IndexGroupMap[idx] = separator
+	printData.IndexGroupMap[idx+1] = colorCyan + inv.Name + colorReset
+	printData.IndexGroupMap[idx+2] = separator
+	idx += 3
+	for _, obj := range identifiers {
+		// check if the object is under one of the targeted namespaces
+		if _, ok := r.namespaceSet[obj.Namespace]; ok || len(r.namespaceSet) == 0 {
+			// add to indexMap for faster referencing
+			printData.IndexResourceMap[idx] = obj
+			idx += 1
+			// append to identifiers
+			printData.Identifiers = append(printData.Identifiers, obj)
 		}
-	} else {
-		// no targeted namespaces, no filtering
-		filteredSlice = identifiers
 	}
-	// Check if all elements are filtered out
-	if len(filteredSlice) == 0 {
-		return identifiersMap, nil
-	}
-
-	// Check if there are targeted inventory names and include the current inventory name
-	if _, ok := r.inventoryNameSet[inv.Name]; !ok && len(r.inventoryNameSet) != 0 {
-		return identifiersMap, nil
-	}
-
-	identifiersMap[inv.Name] = filteredSlice
-	return identifiersMap, nil
+	printData.MaxElement = idx
+	return &printData, nil
 }
 
 // Retrieve a list of inventory object from the cluster
 // Wrap it to become a map mapping from string to ObjMetadataSet
 // Refer to the backbone of GetClusterObjs function in inventory package
-func (r *Runner) listInvFromCluster() (map[string]object.ObjMetadataSet, error) {
+func (r *Runner) listInvFromCluster() (*list.PrintData, error) {
+	// Create an emtpy PrintData object
+	printData := list.PrintData{}
 	// Launch a dynamic client
 	dc, err := r.factory.DynamicClient()
 	if err != nil {
@@ -230,52 +246,77 @@ func (r *Runner) listInvFromCluster() (map[string]object.ObjMetadataSet, error) 
 		return nil, err
 	}
 	if apierrors.IsNotFound(err) {
-		return make(map[string]object.ObjMetadataSet), nil
+		return &printData, nil
 	}
 
 	// wrapping
-	identifiersMap := make(map[string]object.ObjMetadataSet)
+	// initialize maps in printData
+	printData.IndexGroupMap = make(map[int]string)
+	printData.IndexResourceMap = make(map[int]object.ObjMetadata)
+	idx := 0
 	for _, inv := range clusterInvs.Items {
-		wrappedInvObj := live.WrapInventoryObj(&inv)
-		wrappedInvObjSlice, err := wrappedInvObj.Load()
-		if err != nil {
-			return make(map[string]object.ObjMetadataSet), nil
-		}
-		filteredSlice := object.ObjMetadataSet{}
-		// if there are targeted namespaces
-		if len(r.namespaceSet) != 0 {
-			for _, obj := range wrappedInvObjSlice {
-				// check if the object is under one of the targeted namespaces
-				if _, ok := r.namespaceSet[obj.Namespace]; ok {
-					filteredSlice = append(filteredSlice, obj)
-				}
-			}
-		} else {
-			// no targeted namespaces, no filtering
-			filteredSlice = wrappedInvObjSlice
-		}
-		// Check if all elements are filtered out
-		if len(filteredSlice) == 0 {
-			continue
-		}
-
 		invName := inv.GetName()
 		// Check if there are targeted inventory names and include the current inventory name
 		if _, ok := r.inventoryNameSet[invName]; !ok && len(r.inventoryNameSet) != 0 {
 			continue
 		}
-		if _, ok := identifiersMap[invName]; !ok {
-			identifiersMap[invName] = filteredSlice
-		} else {
-			identifiersMap[invName] = append(identifiersMap[invName], filteredSlice...)
+		// Append inventory name
+		printData.IndexGroupMap[idx] = separator
+		printData.IndexGroupMap[idx+1] = colorCyan + invName + colorReset
+		printData.IndexGroupMap[idx+2] = separator
+		idx += 3
+
+		// Get wrapped object
+		wrappedInvObj := live.WrapInventoryObj(&inv)
+		wrappedInvObjSlice, err := wrappedInvObj.Load()
+		if err != nil {
+			return nil, err
+		}
+
+		// Filter objects
+		for _, obj := range wrappedInvObjSlice {
+			// check if the object is under one of the targeted namespaces
+			if _, ok := r.namespaceSet[obj.Namespace]; ok || len(r.namespaceSet) == 0 {
+				// add to indexMap for faster referencing
+				printData.IndexResourceMap[idx] = obj
+				idx += 1
+				// append to identifiers
+				printData.Identifiers = append(printData.Identifiers, obj)
+			}
 		}
 	}
-	return identifiersMap, nil
+	printData.MaxElement = idx
+	return &printData, nil
 }
 
-// Printing status of resources
-func (r *Runner) printStatus(pr printer.Printer, invName string, identifiers object.ObjMetadataSet, stopChan chan int) error {
-	defer func() { stopChan <- 1 }()
+// runE implements the logic of the command and will delegate to the
+// poller to compute status for each of the resources. One of the printer
+// implementations takes care of printing the output.
+func (r *Runner) runE(c *cobra.Command, args []string) error {
+	pr := printer.FromContextOrDie(r.ctx)
+
+	var printData *list.PrintData
+	var err error
+	if r.list {
+		printData, err = r.listInvFromCluster()
+	} else {
+		printData, err = r.loadInvFromDisk(c, args)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Exit here if the inventory is empty.
+	if len(printData.Identifiers) == 0 {
+		pr.Printf("no resources found in the inventory\n")
+		return nil
+	}
+
+	// If status flag is assigned, include it to printData
+	if len(r.statusSet) != 0 {
+		printData.StatusSet = r.statusSet
+	}
+
 	statusPoller, err := r.pollerFactoryFunc(r.factory)
 	if err != nil {
 		return err
@@ -312,63 +353,20 @@ func (r *Runner) printStatus(pr printer.Printer, invName string, identifiers obj
 	printer, err := statusprinters.CreatePrinter(r.output, genericclioptions.IOStreams{
 		Out:    pr.OutStream(),
 		ErrOut: pr.ErrStream(),
-	}, invName)
+	}, printData)
 
 	if err != nil {
 		return errors.WrapPrefix(err, "error creating printer", 1)
 	}
 
-	eventChannel := statusPoller.Poll(ctx, identifiers, polling.PollOptions{
+	eventChannel := statusPoller.Poll(ctx, printData.Identifiers, polling.PollOptions{
 		PollInterval: r.period,
 	})
 
-	err = printer.Print(eventChannel, identifiers, cancelFunc)
+	err = printer.Print(eventChannel, printData.Identifiers, cancelFunc)
 	if err != nil {
 		return err
 	}
-	return nil
-}
-
-// runE implements the logic of the command and will delegate to the
-// poller to compute status for each of the resources. One of the printer
-// implementations takes care of printing the output.
-func (r *Runner) runE(c *cobra.Command, args []string) error {
-	pr := printer.FromContextOrDie(r.ctx)
-
-	var identifiersMap map[string]object.ObjMetadataSet
-	var err error
-	if r.list {
-		identifiersMap, err = r.listInvFromCluster()
-	} else {
-		identifiersMap, err = r.loadInvFromDisk(c, args)
-	}
-	if err != nil {
-		return err
-	}
-
-	// Exit here if the inventory is empty.
-	if len(identifiersMap) == 0 {
-		pr.Printf("no resources found in the inventory\n")
-		return nil
-	}
-
-	counter := 0
-	stopChan := make(chan int, len(identifiersMap))
-	for invName, identifiers := range identifiersMap {
-		// Launch one printer per inventory name
-		go func(invName string, identifiers object.ObjMetadataSet) {
-			// invName as an input argument to avoid a pitfall about using anonymous inside the loop
-			err := r.printStatus(pr, invName, identifiers, stopChan)
-			if err != nil {
-				panic(err)
-			}
-		}(invName, identifiers)
-	}
-	// wait till all printers return
-	for counter < len(identifiersMap) {
-		counter += <-stopChan
-	}
-	close(stopChan)
 	return nil
 }
 
