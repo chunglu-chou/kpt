@@ -16,29 +16,77 @@ package list
 
 import (
 	"fmt"
-	"sync"
+	"strings"
 
 	"sigs.k8s.io/cli-utils/pkg/apply/event"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/collector"
 	pollevent "sigs.k8s.io/cli-utils/pkg/kstatus/polling/event"
 	"sigs.k8s.io/cli-utils/pkg/object"
+	"sigs.k8s.io/cli-utils/pkg/print/common"
 	"sigs.k8s.io/cli-utils/pkg/print/list"
-)
-
-const (
-	// printing parameters
-	colorYellow = "\033[33m"
-	colorCyan   = "\033[36m"
-	colorReset  = "\033[0m"
-	separator   = "-----------------------------------------"
 )
 
 // BaseListPrinter implements the Printer interface and outputs the resource
 // status information as a list of events as they happen.
 type BaseListPrinter struct {
 	Formatter list.Formatter
-	InvName   string
-	Lock      sync.Mutex
+	Data      *PrintData
+}
+
+// PrintData records data required for printing
+type PrintData struct {
+	IndexResourceMap map[int]object.ObjMetadata
+	IndexGroupMap    map[int]string
+	MaxElement       int
+	Identifiers      object.ObjMetadataSet
+	StatusSet        map[string]bool
+}
+
+func (ep *BaseListPrinter) PrintStatus(coll *collector.ResourceStatusCollector, id object.ObjMetadata) error {
+	for idx := 0; idx < ep.Data.MaxElement; idx++ {
+		// clear previous printed line
+		fmt.Printf("%c[2K\r", common.ESC)
+		if text, ok := ep.Data.IndexGroupMap[idx]; ok {
+			// this index represents header for each inventory name
+			fmt.Println(text)
+		} else {
+			// this index represents an object on the cluster
+			identifier := ep.Data.IndexResourceMap[idx]
+			// retrieve the status of object
+			status := coll.ResourceStatuses[identifier]
+			// check if the status is filtered out
+			if _, ok := ep.Data.StatusSet[strings.ToLower(status.Status.String())]; !ok && len(ep.Data.StatusSet) != 0 {
+				continue
+			}
+			// if the object is the one triggered the event channel, make the text green
+			if identifier == id {
+				fmt.Printf("%c[%dm\r", common.ESC, common.GREEN)
+			}
+			// print out status
+			err := ep.Formatter.FormatStatusEvent(event.StatusEvent{
+				Identifier:       identifier,
+				PollResourceInfo: status,
+				Resource:         status.Resource,
+			})
+			// reset the color of text if set to other colors
+			if identifier == id {
+				fmt.Printf("%c[%dm\r", common.ESC, common.RESET)
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// PrintError print out errors when received error events
+func (ep *BaseListPrinter) PrintError(e error) error {
+	err := ep.Formatter.FormatErrorEvent(event.ErrorEvent{Err: e})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // Print takes an event channel and outputs the status events on the channel
@@ -52,39 +100,24 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 	// callback on every event. In the callback we print the status
 	// information and call the cancelFunc which is responsible for
 	// stopping the poller at the correct time.
+	// fmt.Printf("%c7", common.ESC)
 	done := coll.ListenWithObserver(ch, collector.ObserverFunc(
 		func(statusCollector *collector.ResourceStatusCollector, e pollevent.Event) {
-			// critical section
-			ep.Lock.Lock()
-			// print the inventory name
-			fmt.Println(separator)
-			fmt.Println(colorCyan + ep.InvName + colorReset)
-			fmt.Println(separator)
-			fmt.Print(colorYellow)
-			err := ep.printStatusEvent(e)
-			fmt.Print(colorReset)
+			// move the cursor to the origin
+			fmt.Printf("%c[H", common.ESC)
+			// clear the line
+			fmt.Printf("%c[2K\r", common.ESC)
+			err := ep.PrintStatus(coll, e.Resource.Identifier)
 			if err != nil {
-				// error detected, quit critical section
-				ep.Lock.Unlock()
 				panic(err)
 			}
-			// print all status of resources except the latest updated one under this inventory group
-			for id, status := range statusCollector.ResourceStatuses {
-				if id != e.Resource.Identifier {
-					err := ep.Formatter.FormatStatusEvent(event.StatusEvent{
-						Identifier:       id,
-						Resource:         status.Resource,
-						PollResourceInfo: status,
-					})
-					if err != nil {
-						// error detected, quit critical section
-						ep.Lock.Unlock()
-						panic(err)
-					}
+			if e.Type == pollevent.ErrorEvent {
+				err := ep.PrintError(e.Error)
+				if err != nil {
+					panic(err)
 				}
 			}
-			// printing ended, quit critical section
-			ep.Lock.Unlock()
+			fmt.Printf("%c[0J\r", common.ESC)
 			cancelFunc(statusCollector, e)
 		}),
 	)

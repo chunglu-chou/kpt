@@ -14,21 +14,29 @@ import (
 	"sigs.k8s.io/cli-utils/pkg/printers/json"
 )
 
+const (
+	// printing parameters
+	// colorYellow = "\033[33m"
+	colorCyan  = "\033[36m"
+	colorReset = "\033[0m"
+	separator  = "-----------------------------------------"
+)
+
 // CreatePrinter return an implementation of the Printer interface. The
 // actual implementation is based on the printerType requested.
-func CreatePrinter(printerType string, ioStreams genericclioptions.IOStreams, invName string) (printer.Printer, error) {
+func CreatePrinter(printerType string, ioStreams genericclioptions.IOStreams, printData *list.PrintData) (printer.Printer, error) {
 	switch printerType {
 	case printers.TablePrinter:
 		return table.NewTablePrinter(ioStreams), nil
 	case printers.JSONPrinter:
 		return &list.BaseListPrinter{
 			Formatter: json.NewFormatter(ioStreams, common.DryRunNone),
-			InvName:   invName,
+			Data:      printData,
 		}, nil
 	default:
 		return &list.BaseListPrinter{
 			Formatter: events.NewFormatter(ioStreams, common.DryRunNone),
-			InvName:   invName,
+			Data:      printData,
 		}, nil
 	}
 }
