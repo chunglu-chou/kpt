@@ -44,8 +44,6 @@ type PrintData struct {
 
 func (ep *BaseListPrinter) PrintStatus(coll *collector.ResourceStatusCollector, id object.ObjMetadata) error {
 	for idx := 0; idx < ep.Data.MaxElement; idx++ {
-		// clear previous printed line
-		fmt.Printf("%c[2K\r", common.ESC)
 		if text, ok := ep.Data.IndexGroupMap[idx]; ok {
 			// this index represents header for each inventory name
 			fmt.Println(text)
@@ -105,8 +103,8 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 		func(statusCollector *collector.ResourceStatusCollector, e pollevent.Event) {
 			// move the cursor to the origin
 			fmt.Printf("%c[H", common.ESC)
-			// clear the line
-			fmt.Printf("%c[2K\r", common.ESC)
+			// clear all printed content
+			fmt.Printf("%c[0J\r", common.ESC)
 			err := ep.PrintStatus(coll, e.Resource.Identifier)
 			if err != nil {
 				panic(err)
@@ -117,7 +115,6 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 					panic(err)
 				}
 			}
-			fmt.Printf("%c[0J\r", common.ESC)
 			cancelFunc(statusCollector, e)
 		}),
 	)
