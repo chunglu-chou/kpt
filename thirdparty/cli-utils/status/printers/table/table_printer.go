@@ -4,38 +4,60 @@
 package table
 
 import (
+	"fmt"
+	"io"
 	"time"
 
+	"github.com/GoogleContainerTools/kpt/thirdparty/cli-utils/status/printers/list"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/collector"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/event"
 	"sigs.k8s.io/cli-utils/pkg/object"
+	"sigs.k8s.io/cli-utils/pkg/print/common"
 	"sigs.k8s.io/cli-utils/pkg/print/table"
 )
 
 const (
 	// updateInterval defines how often the printer will update the UI.
 	updateInterval = 1 * time.Second
+	// separator for grouping
+	separator = "-----------------------------------------"
 )
 
 // tablePrinter is an implementation of the Printer interface that outputs
 // status information about resources in a table format with in-place updates.
 type tablePrinter struct {
-	ioStreams genericclioptions.IOStreams
+	ioStreams  genericclioptions.IOStreams
+	printData  *list.PrintData
+	invNameMap map[object.ObjMetadata]string
 }
 
 // NewTablePrinter returns a new instance of the tablePrinter.
-func NewTablePrinter(ioStreams genericclioptions.IOStreams) *tablePrinter {
+func NewTablePrinter(ioStreams genericclioptions.IOStreams, printData *list.PrintData) *tablePrinter {
+	invNameMap := make(map[object.ObjMetadata]string)
+	var currGroup string
+	for i := 0; i < printData.MaxElement; i++ {
+		if text, ok := printData.IndexGroupMap[i]; ok {
+			if text != separator {
+				currGroup = text
+			}
+		} else {
+			invNameMap[printData.IndexResourceMap[i]] = currGroup
+		}
+	}
 	return &tablePrinter{
-		ioStreams: ioStreams,
+		ioStreams:  ioStreams,
+		printData:  printData,
+		invNameMap: invNameMap,
 	}
 }
 
 // Print take an event channel and outputs the status events on the channel
 // until the channel is closed .
+//
 //nolint:interfacer
 func (t *tablePrinter) Print(ch <-chan event.Event, identifiers []object.ObjMetadata,
-	cancelFunc collector.ObserverFunc) error {
+		cancelFunc collector.ObserverFunc) error {
 	coll := collector.NewResourceStatusCollector(identifiers)
 	stop := make(chan struct{})
 
@@ -67,6 +89,20 @@ func (t *tablePrinter) Print(ch <-chan event.Event, identifiers []object.ObjMeta
 	return err
 }
 
+var groupColumn = table.ColumnDef{
+	ColumnName:   "group",
+	ColumnHeader: "GROUP",
+	ColumnWidth:  30,
+	PrintResourceFunc: func(w io.Writer, width int, r table.Resource) (int, error) {
+		group := r.(*ResourceInfo).invName
+		if len(group) > width {
+			group = group[:width]
+		}
+		_, err := fmt.Fprint(w, group)
+		return len(group), err
+	},
+}
+
 var columns = []table.ColumnDefinition{
 	table.MustColumn("namespace"),
 	table.MustColumn("resource"),
@@ -74,6 +110,7 @@ var columns = []table.ColumnDefinition{
 	table.MustColumn("conditions"),
 	table.MustColumn("age"),
 	table.MustColumn("message"),
+	groupColumn,
 }
 
 // Print prints the table of resources with their statuses until the
@@ -86,7 +123,9 @@ func (t *tablePrinter) runPrintLoop(coll *CollectorAdapter, stop <-chan struct{}
 		Columns:   columns,
 	}
 
-	linesPrinted := baseTablePrinter.PrintTable(coll.LatestStatus(), 0)
+	fmt.Printf("%c[H", common.ESC)
+	fmt.Printf("%c[J\r", common.ESC)
+	baseTablePrinter.PrintTable(coll.LatestStatus(t.invNameMap, t.printData.StatusSet), 0)
 
 	go func() {
 		defer close(finished)
@@ -95,12 +134,16 @@ func (t *tablePrinter) runPrintLoop(coll *CollectorAdapter, stop <-chan struct{}
 			select {
 			case <-stop:
 				ticker.Stop()
-				linesPrinted = baseTablePrinter.PrintTable(
-					coll.LatestStatus(), linesPrinted)
+				fmt.Printf("%c[H", common.ESC)
+				fmt.Printf("%c[J\r", common.ESC)
+				baseTablePrinter.PrintTable(
+					coll.LatestStatus(t.invNameMap, t.printData.StatusSet), 0)
 				return
 			case <-ticker.C:
-				linesPrinted = baseTablePrinter.PrintTable(
-					coll.LatestStatus(), linesPrinted)
+				fmt.Printf("%c[H", common.ESC)
+				fmt.Printf("%c[J\r", common.ESC)
+				baseTablePrinter.PrintTable(
+					coll.LatestStatus(t.invNameMap, t.printData.StatusSet), 0)
 			}
 		}
 	}()
