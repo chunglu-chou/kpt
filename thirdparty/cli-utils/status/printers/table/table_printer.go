@@ -27,14 +27,14 @@ const (
 // tablePrinter is an implementation of the Printer interface that outputs
 // status information about resources in a table format with in-place updates.
 type tablePrinter struct {
-	ioStreams  genericclioptions.IOStreams
-	printData  *list.PrintData
-	invNameMap map[object.ObjMetadata]string
+	ioStreams genericclioptions.IOStreams
+	printData *list.PrintData
+	// invNameMap map[object.ObjMetadata]string
 }
 
 // NewTablePrinter returns a new instance of the tablePrinter.
 func NewTablePrinter(ioStreams genericclioptions.IOStreams, printData *list.PrintData) *tablePrinter {
-	invNameMap := make(map[object.ObjMetadata]string)
+	/*invNameMap := make(map[object.ObjMetadata]string)
 	var currGroup string
 	for i := 0; i < printData.MaxElement; i++ {
 		if text, ok := printData.IndexGroupMap[i]; ok {
@@ -44,11 +44,11 @@ func NewTablePrinter(ioStreams genericclioptions.IOStreams, printData *list.Prin
 		} else {
 			invNameMap[printData.IndexResourceMap[i]] = currGroup
 		}
-	}
+	}*/
 	return &tablePrinter{
-		ioStreams:  ioStreams,
-		printData:  printData,
-		invNameMap: invNameMap,
+		ioStreams: ioStreams,
+		printData: printData,
+		// invNameMap: invNameMap,
 	}
 }
 
@@ -57,7 +57,7 @@ func NewTablePrinter(ioStreams genericclioptions.IOStreams, printData *list.Prin
 //
 //nolint:interfacer
 func (t *tablePrinter) Print(ch <-chan event.Event, identifiers []object.ObjMetadata,
-		cancelFunc collector.ObserverFunc) error {
+	cancelFunc collector.ObserverFunc) error {
 	coll := collector.NewResourceStatusCollector(identifiers)
 	stop := make(chan struct{})
 
@@ -125,7 +125,7 @@ func (t *tablePrinter) runPrintLoop(coll *CollectorAdapter, stop <-chan struct{}
 
 	fmt.Printf("%c[H", common.ESC)
 	fmt.Printf("%c[J\r", common.ESC)
-	baseTablePrinter.PrintTable(coll.LatestStatus(t.invNameMap, t.printData.StatusSet), 0)
+	baseTablePrinter.PrintTable(coll.LatestStatus(t.printData.InvNameMap, t.printData.StatusSet), 0)
 
 	go func() {
 		defer close(finished)
@@ -137,13 +137,13 @@ func (t *tablePrinter) runPrintLoop(coll *CollectorAdapter, stop <-chan struct{}
 				fmt.Printf("%c[H", common.ESC)
 				fmt.Printf("%c[J\r", common.ESC)
 				baseTablePrinter.PrintTable(
-					coll.LatestStatus(t.invNameMap, t.printData.StatusSet), 0)
+					coll.LatestStatus(t.printData.InvNameMap, t.printData.StatusSet), 0)
 				return
 			case <-ticker.C:
 				fmt.Printf("%c[H", common.ESC)
 				fmt.Printf("%c[J\r", common.ESC)
 				baseTablePrinter.PrintTable(
-					coll.LatestStatus(t.invNameMap, t.printData.StatusSet), 0)
+					coll.LatestStatus(t.printData.InvNameMap, t.printData.StatusSet), 0)
 			}
 		}
 	}()

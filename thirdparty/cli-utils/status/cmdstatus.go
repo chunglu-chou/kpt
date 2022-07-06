@@ -194,26 +194,17 @@ func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (*list.PrintDa
 
 	printData := list.PrintData{}
 	// initialize maps in printData
-	printData.IndexGroupMap = make(map[int]string)
-	printData.IndexResourceMap = make(map[int]object.ObjMetadata)
-	// initialize idx
-	idx := 0
-	// Add the inventory name
-	printData.IndexGroupMap[idx] = separator
-	printData.IndexGroupMap[idx+1] = colorCyan + inv.Name + colorReset
-	printData.IndexGroupMap[idx+2] = separator
-	idx += 3
+	printData.InvNameMap = make(map[object.ObjMetadata]string)
 	for _, obj := range identifiers {
 		// check if the object is under one of the targeted namespaces
 		if _, ok := r.namespaceSet[obj.Namespace]; ok || len(r.namespaceSet) == 0 {
-			// add to indexMap for faster referencing
-			printData.IndexResourceMap[idx] = obj
-			idx += 1
+			// add to the map for future reference
+			printData.InvNameMap[obj] = inv.Name
 			// append to identifiers
 			printData.Identifiers = append(printData.Identifiers, obj)
 		}
 	}
-	printData.MaxElement = idx
+	// printData.MaxElement = idx
 	return &printData, nil
 }
 
@@ -252,20 +243,14 @@ func (r *Runner) listInvFromCluster() (*list.PrintData, error) {
 
 	// wrapping
 	// initialize maps in printData
-	printData.IndexGroupMap = make(map[int]string)
-	printData.IndexResourceMap = make(map[int]object.ObjMetadata)
-	idx := 0
+	printData.InvNameMap = make(map[object.ObjMetadata]string)
+
 	for _, inv := range clusterInvs.Items {
 		invName := inv.GetName()
 		// Check if there are targeted inventory names and include the current inventory name
 		if _, ok := r.inventoryNameSet[invName]; !ok && len(r.inventoryNameSet) != 0 {
 			continue
 		}
-		// Append inventory name
-		printData.IndexGroupMap[idx] = separator
-		printData.IndexGroupMap[idx+1] = colorCyan + invName + colorReset
-		printData.IndexGroupMap[idx+2] = separator
-		idx += 3
 
 		// Get wrapped object
 		wrappedInvObj := live.WrapInventoryObj(&inv)
@@ -278,15 +263,14 @@ func (r *Runner) listInvFromCluster() (*list.PrintData, error) {
 		for _, obj := range wrappedInvObjSlice {
 			// check if the object is under one of the targeted namespaces
 			if _, ok := r.namespaceSet[obj.Namespace]; ok || len(r.namespaceSet) == 0 {
-				// add to indexMap for faster referencing
-				printData.IndexResourceMap[idx] = obj
-				idx += 1
+				// add to the map for future reference
+				printData.InvNameMap[obj] = invName
 				// append to identifiers
 				printData.Identifiers = append(printData.Identifiers, obj)
 			}
 		}
 	}
-	printData.MaxElement = idx
+	// printData.MaxElement = idx
 	return &printData, nil
 }
 
@@ -381,7 +365,7 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 // ResourceStatusCollector that will cancel the context (using the cancelFunc)
 // when all resources have reached the desired status.
 func desiredStatusNotifierFunc(cancelFunc context.CancelFunc,
-	desired kstatus.Status) collector.ObserverFunc {
+		desired kstatus.Status) collector.ObserverFunc {
 	return func(rsc *collector.ResourceStatusCollector, _ event.Event) {
 		var rss []*event.ResourceStatus
 		for _, rs := range rsc.ResourceStatuses {

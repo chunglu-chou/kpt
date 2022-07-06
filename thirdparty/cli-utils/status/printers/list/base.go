@@ -15,14 +15,10 @@
 package list
 
 import (
-	"fmt"
-	"strings"
-
 	"sigs.k8s.io/cli-utils/pkg/apply/event"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/collector"
 	pollevent "sigs.k8s.io/cli-utils/pkg/kstatus/polling/event"
 	"sigs.k8s.io/cli-utils/pkg/object"
-	"sigs.k8s.io/cli-utils/pkg/print/common"
 	"sigs.k8s.io/cli-utils/pkg/print/list"
 )
 
@@ -35,47 +31,12 @@ type BaseListPrinter struct {
 
 // PrintData records data required for printing
 type PrintData struct {
-	IndexResourceMap map[int]object.ObjMetadata
-	IndexGroupMap    map[int]string
-	MaxElement       int
-	Identifiers      object.ObjMetadataSet
-	StatusSet        map[string]bool
-}
-
-func (ep *BaseListPrinter) PrintStatus(coll *collector.ResourceStatusCollector, id object.ObjMetadata) error {
-	for idx := 0; idx < ep.Data.MaxElement; idx++ {
-		if text, ok := ep.Data.IndexGroupMap[idx]; ok {
-			// this index represents header for each inventory name
-			fmt.Println(text)
-		} else {
-			// this index represents an object on the cluster
-			identifier := ep.Data.IndexResourceMap[idx]
-			// retrieve the status of object
-			status := coll.ResourceStatuses[identifier]
-			// check if the status is filtered out
-			if _, ok := ep.Data.StatusSet[strings.ToLower(status.Status.String())]; !ok && len(ep.Data.StatusSet) != 0 {
-				continue
-			}
-			// if the object is the one triggered the event channel, make the text green
-			if identifier == id {
-				fmt.Printf("%c[%dm\r", common.ESC, common.GREEN)
-			}
-			// print out status
-			err := ep.Formatter.FormatStatusEvent(event.StatusEvent{
-				Identifier:       identifier,
-				PollResourceInfo: status,
-				Resource:         status.Resource,
-			})
-			// reset the color of text if set to other colors
-			if identifier == id {
-				fmt.Printf("%c[%dm\r", common.ESC, common.RESET)
-			}
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	// IndexResourceMap map[int]object.ObjMetadata
+	// IndexGroupMap    map[int]string
+	// MaxElement       int
+	Identifiers object.ObjMetadataSet
+	InvNameMap  map[object.ObjMetadata]string
+	StatusSet   map[string]bool
 }
 
 // PrintError print out errors when received error events
@@ -100,19 +61,9 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 	// stopping the poller at the correct time.
 	done := coll.ListenWithObserver(ch, collector.ObserverFunc(
 		func(statusCollector *collector.ResourceStatusCollector, e pollevent.Event) {
-			// move the cursor to the origin
-			fmt.Printf("%c[H", common.ESC)
-			// clear all printed content
-			fmt.Printf("%c[0J\r", common.ESC)
-			err := ep.PrintStatus(coll, e.Resource.Identifier)
+			err := ep.printStatusEvent(e)
 			if err != nil {
 				panic(err)
-			}
-			if e.Type == pollevent.ErrorEvent {
-				err := ep.PrintError(e.Error)
-				if err != nil {
-					panic(err)
-				}
 			}
 			cancelFunc(statusCollector, e)
 		}),
