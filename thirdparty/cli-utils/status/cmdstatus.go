@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/event"
 	kstatus "sigs.k8s.io/cli-utils/pkg/kstatus/status"
 	"sigs.k8s.io/cli-utils/pkg/object"
+	"sigs.k8s.io/cli-utils/pkg/print/common"
 	"sigs.k8s.io/cli-utils/pkg/printers"
 )
 
@@ -119,8 +120,8 @@ func (r *Runner) preRunE(*cobra.Command, []string) error {
 		return fmt.Errorf("unknown output type %q", r.output)
 	}
 
-	if !r.list && (r.inventoryNames != "" || r.namespaces != "") {
-		return fmt.Errorf("namespace and inv-name flag should only be used with list flag")
+	if !r.list && r.inventoryNames != "" {
+		return fmt.Errorf("inv-name flag should only be used with list flag")
 	}
 
 	if r.inventoryNames != "" {
@@ -298,6 +299,12 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 	var printData *list.PrintData
 	var err error
 	if r.list {
+		if len(args) != 0 {
+			fmt.Printf("%c[%dm", common.ESC, common.YELLOW)
+			fmt.Println("Warning: Path is assigned while list flag is enabled, ignore the path")
+			fmt.Printf("%c[%dm", common.ESC, common.RESET)
+			time.Sleep(3 * time.Second)
+		}
 		printData, err = r.listInvFromCluster()
 	} else {
 		printData, err = r.loadInvFromDisk(c, args)
@@ -374,7 +381,7 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 // ResourceStatusCollector that will cancel the context (using the cancelFunc)
 // when all resources have reached the desired status.
 func desiredStatusNotifierFunc(cancelFunc context.CancelFunc,
-		desired kstatus.Status) collector.ObserverFunc {
+	desired kstatus.Status) collector.ObserverFunc {
 	return func(rsc *collector.ResourceStatusCollector, _ event.Event) {
 		var rss []*event.ResourceStatus
 		for _, rs := range rsc.ResourceStatuses {

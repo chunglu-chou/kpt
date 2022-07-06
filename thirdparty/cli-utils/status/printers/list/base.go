@@ -98,7 +98,6 @@ func (ep *BaseListPrinter) Print(ch <-chan pollevent.Event, identifiers []object
 	// callback on every event. In the callback we print the status
 	// information and call the cancelFunc which is responsible for
 	// stopping the poller at the correct time.
-	// fmt.Printf("%c7", common.ESC)
 	done := coll.ListenWithObserver(ch, collector.ObserverFunc(
 		func(statusCollector *collector.ResourceStatusCollector, e pollevent.Event) {
 			// move the cursor to the origin
