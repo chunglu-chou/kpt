@@ -105,8 +105,8 @@ func TestStatusCommand(t *testing.T) {
 				},
 			},
 			expectedOutput: `
-deployment.apps/foo is InProgress: inProgress
-statefulset.apps/bar is Current: current
+foo/deployment.apps/default/foo is InProgress: inProgress
+foo/statefulset.apps/default/bar is Current: current
 `,
 		},
 		"wait for all current": {
@@ -156,10 +156,10 @@ statefulset.apps/bar is Current: current
 				},
 			},
 			expectedOutput: `
-deployment.apps/foo is InProgress: inProgress
-statefulset.apps/bar is InProgress: inProgress
-statefulset.apps/bar is Current: current
-deployment.apps/foo is Current: current
+foo/deployment.apps/default/foo is InProgress: inProgress
+foo/statefulset.apps/default/bar is InProgress: inProgress
+foo/statefulset.apps/default/bar is Current: current
+foo/deployment.apps/default/foo is Current: current
 `,
 		},
 		"wait for all deleted": {
@@ -193,8 +193,8 @@ deployment.apps/foo is Current: current
 				},
 			},
 			expectedOutput: `
-statefulset.apps/bar is NotFound: notFound
-deployment.apps/foo is NotFound: notFound
+foo/statefulset.apps/default/bar is NotFound: notFound
+foo/deployment.apps/default/foo is NotFound: notFound
 `,
 		},
 		"forever with timeout": {
@@ -229,8 +229,8 @@ deployment.apps/foo is NotFound: notFound
 				},
 			},
 			expectedOutput: `
-statefulset.apps/bar is InProgress: inProgress
-deployment.apps/foo is InProgress: inProgress
+foo/statefulset.apps/default/bar is InProgress: inProgress
+foo/deployment.apps/default/foo is InProgress: inProgress
 `,
 		},
 	}

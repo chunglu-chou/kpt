@@ -11,13 +11,11 @@ import (
 	"time"
 
 	"github.com/GoogleContainerTools/kpt/internal/docs/generated/livedocs"
-	"github.com/GoogleContainerTools/kpt/internal/printer"
+	kptprinter "github.com/GoogleContainerTools/kpt/internal/printer"
 	"github.com/GoogleContainerTools/kpt/internal/util/argutil"
 	"github.com/GoogleContainerTools/kpt/internal/util/strings"
 	"github.com/GoogleContainerTools/kpt/pkg/live"
 	"github.com/GoogleContainerTools/kpt/pkg/status"
-	statusprinters "github.com/GoogleContainerTools/kpt/thirdparty/cli-utils/status/printers"
-	"github.com/GoogleContainerTools/kpt/thirdparty/cli-utils/status/printers/list"
 	"github.com/go-errors/errors"
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,6 +23,8 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/slice"
+	statusprinters "sigs.k8s.io/cli-utils/cmd/status/printers"
+	"sigs.k8s.io/cli-utils/cmd/status/printers/printer"
 	"sigs.k8s.io/cli-utils/pkg/apply/poller"
 	"sigs.k8s.io/cli-utils/pkg/inventory"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling"
@@ -156,7 +156,7 @@ func (r *Runner) preRunE(*cobra.Command, []string) error {
 // Load inventory info from local storage
 // and get info from the cluster based on the local info
 // wrap it to be a map mapping from string to objectMetadataSet
-func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (*list.PrintData, error) {
+func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (*printer.PrintData, error) {
 	if len(args) == 0 {
 		// default to the current working directory
 		cwd, err := os.Getwd()
@@ -197,7 +197,7 @@ func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (*list.PrintDa
 		return nil, err
 	}
 
-	printData := list.PrintData{}
+	printData := printer.PrintData{}
 	// initialize maps in printData
 	printData.InvNameMap = make(map[object.ObjMetadata]string)
 	for _, obj := range identifiers {
@@ -215,9 +215,9 @@ func (r *Runner) loadInvFromDisk(c *cobra.Command, args []string) (*list.PrintDa
 // Retrieve a list of inventory object from the cluster
 // Wrap it to become a map mapping from string to ObjMetadataSet
 // Refer to the backbone of GetClusterObjs function in inventory package
-func (r *Runner) listInvFromCluster() (*list.PrintData, error) {
+func (r *Runner) listInvFromCluster() (*printer.PrintData, error) {
 	// Create an emtpy PrintData object
-	printData := list.PrintData{}
+	printData := printer.PrintData{}
 	// Launch a dynamic client
 	dc, err := r.factory.DynamicClient()
 	if err != nil {
@@ -281,9 +281,9 @@ func (r *Runner) listInvFromCluster() (*list.PrintData, error) {
 // poller to compute status for each of the resources. One of the printer
 // implementations takes care of printing the output.
 func (r *Runner) runE(c *cobra.Command, args []string) error {
-	pr := printer.FromContextOrDie(r.ctx)
+	pr := kptprinter.FromContextOrDie(r.ctx)
 
-	var printData *list.PrintData
+	var printData *printer.PrintData
 	var err error
 	if r.invType == Remote {
 		if len(args) != 0 {
@@ -363,7 +363,7 @@ func (r *Runner) runE(c *cobra.Command, args []string) error {
 // ResourceStatusCollector that will cancel the context (using the cancelFunc)
 // when all resources have reached the desired status.
 func desiredStatusNotifierFunc(cancelFunc context.CancelFunc,
-		desired kstatus.Status) collector.ObserverFunc {
+	desired kstatus.Status) collector.ObserverFunc {
 	return func(rsc *collector.ResourceStatusCollector, _ event.Event) {
 		var rss []*event.ResourceStatus
 		for _, rs := range rsc.ResourceStatuses {
